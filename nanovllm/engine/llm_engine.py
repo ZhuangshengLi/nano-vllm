@@ -22,6 +22,9 @@ class LLMEngine:
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")
+        # TODO(distributed): this loop currently launches only tensor-parallel
+        # follower ranks. A full topology needs one worker per
+        # DP replica / PP stage / TP rank combination.
         for i in range(1, config.tensor_parallel_size):
             event = ctx.Event()
             process = ctx.Process(target=ModelRunner, args=(config, i, event))
@@ -41,12 +44,16 @@ class LLMEngine:
             p.join()
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
+        # TODO(data-parallel): this single engine owns one Scheduler today.
+        # Request routing should move above this method when DP replicas exist.
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
 
     def step(self):
+        # TODO(data-parallel): a DP router will call step on each replica and
+        # merge finished sequence ids back into the original request order.
         seqs, is_prefill = self.scheduler.schedule()
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         token_ids = self.model_runner.call("run", seqs, is_prefill)
@@ -66,6 +73,8 @@ class LLMEngine:
         pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True, disable=not use_tqdm)
         if not isinstance(sampling_params, list):
             sampling_params = [sampling_params] * len(prompts)
+        # TODO(data-parallel): static offline sharding can happen here first;
+        # later serving code can replace it with load-aware routing.
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
         outputs = {}

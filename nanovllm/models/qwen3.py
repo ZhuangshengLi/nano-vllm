@@ -26,11 +26,16 @@ class Qwen3Attention(nn.Module):
         rope_scaling: dict | None = None,
     ) -> None:
         super().__init__()
+        # TODO(tensor-parallel): this should read TP size from parallel_state,
+        # not the global world size, so PP stages and DP replicas compose.
         tp_size = dist.get_world_size()
         self.total_num_heads = num_heads
+        # TODO(tensor-parallel): total attention heads must be divisible by the
+        # TP size because each rank owns a contiguous head shard.
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
+        # TODO(tensor-parallel): KV heads follow the same TP divisibility rule.
         assert self.total_num_kv_heads % tp_size == 0
         self.num_kv_heads = self.total_num_kv_heads // tp_size
         self.head_dim = head_dim or hidden_size // self.total_num_heads
@@ -167,6 +172,8 @@ class Qwen3Model(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        # TODO(pipeline-parallel): instantiate only the decoder layers owned by
+        # this PP stage instead of materializing the full ModuleList everywhere.
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -177,6 +184,8 @@ class Qwen3Model(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
+        # TODO(pipeline-parallel): each stage should run its local layer range
+        # and send hidden_states/residual to the next stage boundary.
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, residual)
         hidden_states, _ = self.norm(hidden_states, residual)

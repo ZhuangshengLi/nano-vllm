@@ -16,6 +16,9 @@ A lightweight vLLM implementation built from scratch.
 * 📖 **Readable codebase** - Clean implementation in ~ 1,200 lines of Python code
 * ⚡ **Optimization Suite** - Prefix caching, Tensor Parallelism, Torch compilation, CUDA graph, etc.
 
+<!-- TODO(docs): document when to use data parallelism, tensor parallelism,
+pipeline parallelism, and the limits of the first learning implementation. -->
+
 ## Installation
 
 ```bash

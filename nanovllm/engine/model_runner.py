@@ -23,7 +23,11 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
+        # TODO(distributed): replace this fixed single-machine global process
+        # group with DP/PP/TP groups derived from Config.distributed_init_method.
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        # TODO(distributed): device assignment currently assumes global rank is
+        # the local CUDA index. A topology object should map ranks to devices.
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
@@ -40,6 +44,9 @@ class ModelRunner:
 
         if self.world_size > 1:
             if rank == 0:
+                # TODO(distributed): this shared-memory RPC only drives TP
+                # follower ranks. DP replicas and PP stages need a WorkerGroup
+                # abstraction instead of one hard-coded segment.
                 self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
                 dist.barrier()
             else:
@@ -83,6 +90,8 @@ class ModelRunner:
             event.set()
 
     def call(self, method_name, *args):
+        # TODO(distributed): this fan-out assumes rank 0 controls every other
+        # worker. With PP, each stage also needs point-to-point coordination.
         if self.world_size > 1 and self.rank == 0:
             self.write_shm(method_name, *args)
         method = getattr(self, method_name, None)
@@ -107,6 +116,8 @@ class ModelRunner:
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        # TODO(tensor-parallel): KV heads are sharded only across the TP group,
+        # not across DP replicas or PP stages.
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
@@ -194,6 +205,8 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+        # TODO(pipeline-parallel): PP needs a pipeline driver here instead of
+        # calling the complete model forward on every worker.
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
@@ -215,12 +228,17 @@ class ModelRunner:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
+        # TODO(pipeline-parallel): sampling should happen only on the last PP
+        # stage and TP rank 0, then return token ids to that replica scheduler.
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids
 
     @torch.inference_mode()
     def capture_cudagraph(self):
+        # TODO(pipeline-parallel): disable or defer CUDA graph capture for the
+        # first PP implementation because inter-stage communication changes the
+        # execution shape and synchronization boundaries.
         config = self.config
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)

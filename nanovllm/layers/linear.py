@@ -20,6 +20,8 @@ class LinearBase(nn.Module):
     ):
         super().__init__()
         self.tp_dim = tp_dim
+        # TODO(tensor-parallel): read rank and size from the TP process group
+        # instead of the global group so DP replicas do not participate here.
         self.tp_rank = dist.get_rank()
         self.tp_size = dist.get_world_size()
         self.weight = nn.Parameter(torch.empty(output_size, input_size))
@@ -152,5 +154,7 @@ class RowParallelLinear(LinearBase):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
         if self.tp_size > 1:
+            # TODO(tensor-parallel): limit this reduction to the TP group once
+            # parallel_state exposes TP process groups.
             dist.all_reduce(y)
         return y

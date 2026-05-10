@@ -14,6 +14,8 @@ class VocabParallelEmbedding(nn.Module):
         embedding_dim: int,
     ):
         super().__init__()
+        # TODO(tensor-parallel): use the TP rank and size from parallel_state
+        # so vocab shards are independent for each DP replica.
         self.tp_rank = dist.get_rank()
         self.tp_size = dist.get_world_size()
         assert num_embeddings % self.tp_size == 0
@@ -38,6 +40,8 @@ class VocabParallelEmbedding(nn.Module):
         y = F.embedding(x, self.weight)
         if self.tp_size > 1:
             y = mask.unsqueeze(1) * y
+            # TODO(tensor-parallel): this all-reduce is TP-local; DP replicas
+            # must not exchange activations for independent requests.
             dist.all_reduce(y)
         return y
 
@@ -61,6 +65,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         logits = F.linear(x, self.weight)
         if self.tp_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None
+            # TODO(tensor-parallel): gather logits only within the TP group;
+            # the owning DP replica then samples its own next tokens.
             dist.gather(logits, all_logits, 0)
             logits = torch.cat(all_logits, -1) if self.tp_rank == 0 else None
         return logits
